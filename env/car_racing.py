@@ -57,17 +57,20 @@ TRACK_RAD = 600/SCALE   # Track is heavily morphed circle with this radius
 PLAYFIELD = 1100/SCALE  # Game over boundary
 FPS = 50                # Frames per second
 ZOOM = 1                # Camera zoom
-ZOOM_FOLLOW = False       # Set to False for fixed view (don't use zoom)
+ZOOM_FOLLOW = False     # Set to False for fixed view (don't use zoom)
 
 TRACK_DETAIL_STEP = 21/SCALE
 TRACK_TURN_RATE = 0.31
 TRACK_WIDTH = 60/SCALE
-TRACK_TOL_WIDTH = TRACK_WIDTH * 2
+TRACK_GRASS_WIDTH = TRACK_WIDTH * 2
 BORDER = 8/SCALE
 BORDER_MIN_COUNT = 4
 
 ROAD_COLOR = [0.4, 0.4, 0.4]
+GRASS_COLOR = [0.4, 0.8, 0.4]
 
+LOOK_AHEAD = 80 # How many tiles the car can 'see' in front of it
+VISIBLE_ROAD_COLOR = [0.8, 0.4, 0.4]
 
 class FrictionDetector(contactListener):
     def __init__(self, env):
@@ -101,9 +104,9 @@ class FrictionDetector(contactListener):
             obj['car'] = u2
 
         # Check for grass
-        if "grass" in u1.__dict__:
+        if "grass_idx" in u1.__dict__:
             obj['grass'] = u1
-        elif "grass" in u2.__dict__:
+        elif "grass_idx" in u2.__dict__:
             obj['grass'] = u2
         
         if 'road' in obj and 'car' in obj:
@@ -126,9 +129,10 @@ class FrictionDetector(contactListener):
         
         if 'car' in obj and 'grass' in obj:
             if begin:
-                self.env.on_grass += 1
+                self.env.on_grass_idx.add(obj['grass'].grass_idx)
             else:
-                self.env.on_grass -= 1
+                if obj['grass'].grass_idx in self.env.on_grass_idx:
+                    self.env.on_grass_idx.remove(obj['grass'].grass_idx)
 
 
 class CarRacing(gym.Env, EzPickle):
@@ -146,14 +150,13 @@ class CarRacing(gym.Env, EzPickle):
         self.invisible_state_window = None
         self.invisible_video_window = None
         self.road = None
-        self.grass = None
-        self.on_grass = 0
+        self.grass = []
+        self.on_grass_idx = set()
         self.car = None
         self.reward = 0.0
         self.prev_reward = 0.0
         self.verbose = verbose
-        self.fd_tile = fixtureDef(
-                shape=polygonShape(vertices=[(0, 0), (1, 0), (1, -1), (0, -1)]))
+        self.poly = {'grass': [], 'road': [], 'other': []}
 
         self.action_space = spaces.Box(np.array([-1, 0, 0]),
                                        np.array([+1, +1, +1]),
@@ -172,10 +175,11 @@ class CarRacing(gym.Env, EzPickle):
             self.world.DestroyBody(t)
         self.road = []
 
-        if not self.grass:
-            return
-        self.world.DestroyBody(self.grass)
-        self.grass = None
+        for t in self.grass:
+            self.world.DestroyBody(t)
+        self.grass = []
+
+        self.grass_idx = None
 
         self.car.destroy()
 
@@ -304,31 +308,35 @@ class CarRacing(gym.Env, EzPickle):
             alpha1, beta1, x1, y1 = track[i]
             alpha2, beta2, x2, y2 = track[i-1]
 
-            road1_l = (x1 - TRACK_TOL_WIDTH*math.cos(beta1), y1 - TRACK_TOL_WIDTH*math.sin(beta1))
-            road1_r = (x1 + TRACK_TOL_WIDTH*math.cos(beta1), y1 + TRACK_TOL_WIDTH*math.sin(beta1))
-            road2_l = (x2 - TRACK_TOL_WIDTH*math.cos(beta2), y2 - TRACK_TOL_WIDTH*math.sin(beta2))
-            road2_r = (x2 + TRACK_TOL_WIDTH*math.cos(beta2), y2 + TRACK_TOL_WIDTH*math.sin(beta2))
-            self.road_poly.append(( [road1_l, road1_r, road2_r, road2_l], [0.4, 0.8, 0.4] ))
-            
-            # NB. isSensor = True allows the car to collide with the grass fixtures without blocking
-            grass_fixtures.append(fixtureDef(
+            # Grass fixtures
+            road1_l = (x1 - TRACK_GRASS_WIDTH*math.cos(beta1), y1 - TRACK_GRASS_WIDTH*math.sin(beta1))
+            road1_r = (x1 + TRACK_GRASS_WIDTH*math.cos(beta1), y1 + TRACK_GRASS_WIDTH*math.sin(beta1))
+            road2_l = (x2 - TRACK_GRASS_WIDTH*math.cos(beta2), y2 - TRACK_GRASS_WIDTH*math.sin(beta2))
+            road2_r = (x2 + TRACK_GRASS_WIDTH*math.cos(beta2), y2 + TRACK_GRASS_WIDTH*math.sin(beta2))
+            self.poly['grass'].append(( [road1_l, road1_r, road2_r, road2_l], GRASS_COLOR ))
+            t = self.world.CreateStaticBody(fixtures=fixtureDef(
                 shape=polygonShape(vertices=[road1_l, road1_r, road2_r, road2_l]), isSensor = True))
+            t.userData = t
+            t.userData.grass_idx = len(self.grass)
+            self.grass.append(t)
 
+            # Road fixtures
             road1_l = (x1 - TRACK_WIDTH*math.cos(beta1), y1 - TRACK_WIDTH*math.sin(beta1))
             road1_r = (x1 + TRACK_WIDTH*math.cos(beta1), y1 + TRACK_WIDTH*math.sin(beta1))
             road2_l = (x2 - TRACK_WIDTH*math.cos(beta2), y2 - TRACK_WIDTH*math.sin(beta2))
             road2_r = (x2 + TRACK_WIDTH*math.cos(beta2), y2 + TRACK_WIDTH*math.sin(beta2))
-            vertices = [road1_l, road1_r, road2_r, road2_l]
-            self.fd_tile.shape.vertices = vertices
-            t = self.world.CreateStaticBody(fixtures=self.fd_tile)
+            t = self.world.CreateStaticBody(fixtures=fixtureDef(
+                shape=polygonShape(vertices=[road1_l, road1_r, road2_r, road2_l]), isSensor = True))
             t.userData = t
-            c = 0.01*(i%3)
-            t.color = [ROAD_COLOR[0] + c, ROAD_COLOR[1] + c, ROAD_COLOR[2] + c]
             t.road_visited = False
             t.road_friction = 1.0
-            t.fixtures[0].sensor = True
-            self.road_poly.append(( [road1_l, road1_r, road2_r, road2_l], t.color ))
+            # Vary the colour of the road
+            c = 0.01*(i%3)
+            t.color = [ROAD_COLOR[0] + c, ROAD_COLOR[1] + c, ROAD_COLOR[2] + c]
+            self.poly['road'].append(( [road1_l, road1_r, road2_r, road2_l], t.color ))
             self.road.append(t)
+
+            # Red/white borders (only occur in the render)
             if border[i]:
                 side = np.sign(beta2 - beta1)
                 b1_l = (x1 + side * TRACK_WIDTH * math.cos(beta1), y1 + side * TRACK_WIDTH * math.sin(beta1))
@@ -337,12 +345,8 @@ class CarRacing(gym.Env, EzPickle):
                 b2_l = (x2 + side * TRACK_WIDTH * math.cos(beta2), y2 + side * TRACK_WIDTH * math.sin(beta2))
                 b2_r = (x2 + side * (TRACK_WIDTH+BORDER) * math.cos(beta2),
                         y2 + side * (TRACK_WIDTH+BORDER) * math.sin(beta2))
-                self.road_poly.append(([b1_l, b1_r, b2_r, b2_l], (1, 1, 1) if i % 2 == 0 else (1, 0, 0)))
+                self.poly['other'].append(([b1_l, b1_r, b2_r, b2_l], (1, 1, 1) if i % 2 == 0 else (1, 0, 0)))
         
-        self.grass = self.world.CreateStaticBody(fixtures=grass_fixtures)
-        self.grass.userData = self.grass # make the userdata pointer point to the object
-        self.grass.userData.grass = True
-
         self.track = track
         return True
 
@@ -352,7 +356,8 @@ class CarRacing(gym.Env, EzPickle):
         self.prev_reward = 0.0
         self.tile_visited_count = 0
         self.t = 0.0
-        self.road_poly = []
+        self.poly = {'grass': [], 'road': [], 'other': []}
+        self.on_grass_idx.clear()
 
         while True:
             success = self._create_track()
@@ -388,7 +393,7 @@ class CarRacing(gym.Env, EzPickle):
             if self.tile_visited_count == len(self.track):
                 done = True
             x, y = self.car.hull.position
-            if abs(x) > PLAYFIELD or abs(y) > PLAYFIELD or self.on_grass == 0:
+            if abs(x) > PLAYFIELD or abs(y) > PLAYFIELD or len(self.on_grass_idx) == 0:
                 done = True
                 step_reward = -100
 
@@ -498,19 +503,24 @@ class CarRacing(gym.Env, EzPickle):
         gl.glVertex3f(+PLAYFIELD, -PLAYFIELD, 0)
         gl.glVertex3f(-PLAYFIELD, -PLAYFIELD, 0)
 
-        # Draw hashed squares
-        #gl.glColor4f(0.2, 0.2, 0.2, 1.0)
-        #k = PLAYFIELD/20.0
-        #for x in range(-20, 20, 2):
-        #    for y in range(-20, 20, 2):
-        #        gl.glVertex3f(k*x + k, k*y + 0, 0)
-        #        gl.glVertex3f(k*x + 0, k*y + 0, 0)
-        #        gl.glVertex3f(k*x + 0, k*y + k, 0)
-        #        gl.glVertex3f(k*x + k, k*y + k, 0)
-        for poly, color in self.road_poly:
-            gl.glColor4f(color[0], color[1], color[2], 1)
+        # Draw grass
+        if len(self.on_grass_idx) == 0:
+           grass_idx = None # this only occurs just before a reset when you drive off the track
+        else: 
+            grass_idx = min(self.on_grass_idx)
+        for i, (poly, color) in enumerate(self.poly['grass']):
+            if grass_idx is not None and ((i >= grass_idx and i < grass_idx + LOOK_AHEAD) or i < (grass_idx + LOOK_AHEAD)-len(self.poly['grass'])):
+                color = VISIBLE_ROAD_COLOR
+            gl.glColor4f(*color, 1)
             for p in poly:
                 gl.glVertex3f(p[0], p[1], 0)
+
+        # Draw road and other items (like the red/white borders)
+        for key in ['road', 'other']:
+            for poly, color in self.poly[key]:
+                gl.glColor4f(*color, 1)
+                for p in poly:
+                    gl.glVertex3f(p[0], p[1], 0)
         gl.glEnd()
 
     def render_indicators(self, W, H):
