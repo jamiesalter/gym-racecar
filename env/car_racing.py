@@ -70,7 +70,7 @@ ROAD_COLOR = [0.4, 0.4, 0.4]
 GRASS_COLOR = [0.4, 0.8, 0.4]
 
 LOOK_AHEAD = 80 # How many tiles the car can 'see' in front of it
-VISIBLE_ROAD_COLOR = [0.8, 0.4, 0.4]
+VISIBLE_ROAD_COLOR = [0.4, 0.8, 0.4]
 
 class FrictionDetector(contactListener):
     def __init__(self, env):
@@ -163,6 +163,8 @@ class CarRacing(gym.Env, EzPickle):
                                        dtype=np.float32)  # steer, gas, brake
 
         self.observation_space = spaces.Box(low=0, high=255, shape=(STATE_H, STATE_W, 3), dtype=np.uint8)
+
+        self.timer = 0
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -303,7 +305,6 @@ class CarRacing(gym.Env, EzPickle):
                 border[i-neg] |= border[i]
 
         # Create tiles
-        grass_fixtures = []
         for i in range(len(track)):
             alpha1, beta1, x1, y1 = track[i]
             alpha2, beta2, x2, y2 = track[i-1]
@@ -402,7 +403,26 @@ class CarRacing(gym.Env, EzPickle):
     def render(self, mode='human'):
         assert mode in ['human', 'state_pixels', 'rgb_array', 'vector_track']
 
+        # Note that the verticies are arranged in order of how close each tile is.
+        # But there is no guarantee in the order of which side (left or right) is returned.
+        # And the first tile returned may include the both right and then both left vertices of the quad
+        visible_road_vertices = self.getRoadVertices()
+
+        #if self.car is not None and self.car.hull is not None:
+            #local_v = np.array([self.car.hull.GetLocalPoint(v) for v in visible_road_vertices])
+            #local_v = np.c_[local_v, np.linalg.norm(local_v, axis=1)]
+            #if self.timer % 20 == 0:
+            #    np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
+            #    print(local_v)
+            #self.timer += 1
+
         if mode == "vector_track":
+
+            if self.car is None or self.car.hull is None:
+                return None
+            
+            local_v = np.array([self.car.hull.GetLocalPoint(v) for v in visible_road_vertices])
+        
             # Return two vectors of each side of the track relative to the frame of the car
             # Also return the following wheel parameters: steer, gas, brake, speed and vehicle speed (forward and sideways)
             arr = np.array([self.car.wheels[0].steer, 
@@ -411,6 +431,7 @@ class CarRacing(gym.Env, EzPickle):
                             self.car.wheels[0].vr, self.car.wheels[1].vr,
                             self.car.wheels[2].vr, self.car.wheels[3].vr,
                             self.car.wheels[2].vf, self.car.wheels[2].vs])
+            arr = np.r_[arr, local_v[:,0], local_v[:,1]]
             return arr
 
         if self.viewer is None:
@@ -470,7 +491,7 @@ class CarRacing(gym.Env, EzPickle):
 
         gl.glViewport(0, 0, VP_W, VP_H)
         t.enable()
-        self.render_road()
+        self.render_road(visible_road_vertices)
         for geom in self.viewer.onetime_geoms:
             geom.render()
         self.viewer.onetime_geoms = []
@@ -488,12 +509,35 @@ class CarRacing(gym.Env, EzPickle):
 
         return arr
 
+    def getRoadVertices(self):
+        vertices = []
+        vertices2 = []
+
+        if self.road is not None and len(self.on_grass_idx) > 0:
+            tile_idx = max(self.on_grass_idx)
+            for i, t in enumerate(self.road):
+                if tile_idx is None:
+                    break
+                if i >= tile_idx and i < tile_idx + LOOK_AHEAD:
+                    vertices.extend(t.fixtures[0].shape.vertices)
+                if i < (tile_idx + LOOK_AHEAD) - len(self.road):
+                    # We're adding this separately as we need to ensure these get added to the end of the list
+                    vertices2.extend(t.fixtures[0].shape.vertices)
+
+        vertices.extend(vertices2)
+
+        # Remove duplicates in the road vertices
+        # This works because dictionaries can't have duplicate keys
+        vertices = list(dict.fromkeys(vertices))
+
+        return vertices
+
     def close(self):
         if self.viewer is not None:
             self.viewer.close()
             self.viewer = None
 
-    def render_road(self):
+    def render_road(self, visible_vertices):
         gl.glBegin(gl.GL_QUADS)
 
         # Draw background
@@ -507,7 +551,7 @@ class CarRacing(gym.Env, EzPickle):
         if len(self.on_grass_idx) == 0:
            grass_idx = None # this only occurs just before a reset when you drive off the track
         else: 
-            grass_idx = min(self.on_grass_idx)
+            grass_idx = max(self.on_grass_idx)
         for i, (poly, color) in enumerate(self.poly['grass']):
             if grass_idx is not None and ((i >= grass_idx and i < grass_idx + LOOK_AHEAD) or i < (grass_idx + LOOK_AHEAD)-len(self.poly['grass'])):
                 color = VISIBLE_ROAD_COLOR
@@ -521,6 +565,15 @@ class CarRacing(gym.Env, EzPickle):
                 gl.glColor4f(*color, 1)
                 for p in poly:
                     gl.glVertex3f(p[0], p[1], 0)
+
+        gl.glEnd()
+
+        # Draw the visible vertices
+        gl.glPointSize(5)
+        gl.glBegin(gl.GL_POINTS)
+        for i, v in enumerate(visible_vertices):
+            gl.glColor4f(1-i/len(visible_vertices), 0, 0, 1.0)
+            gl.glVertex3f(v[0], v[1], 0)
         gl.glEnd()
 
     def render_indicators(self, W, H):
@@ -546,6 +599,7 @@ class CarRacing(gym.Env, EzPickle):
             gl.glVertex3f((place+val)*s, 4*h, 0)
             gl.glVertex3f((place+val)*s, 2*h, 0)
             gl.glVertex3f((place+0)*s, 2*h, 0)
+
         true_speed = np.sqrt(np.square(self.car.hull.linearVelocity[0]) + np.square(self.car.hull.linearVelocity[1]))
         vertical_ind(5, 0.02*true_speed, (1, 1, 1))
         vertical_ind(7, 0.01*self.car.wheels[0].omega, (0.0, 0, 1)) # ABS sensors
