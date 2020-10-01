@@ -43,7 +43,7 @@ from gym.utils import colorize, seeding, EzPickle
 import pyglet
 from pyglet import gl
 
-from car_dynamics import Car
+from gym_racecar.envs.car_dynamics import Car
 
 STATE_W = 96   # less than Atari 160x192
 STATE_H = 96
@@ -69,7 +69,7 @@ BORDER_MIN_COUNT = 4
 ROAD_COLOR = [0.4, 0.4, 0.4]
 GRASS_COLOR = [0.4, 0.8, 0.4]
 
-LOOK_AHEAD = 80 # How many tiles the car can 'see' in front of it
+LOOK_AHEAD = 30 # How many tiles the car can 'see' in front of it
 VISIBLE_ROAD_COLOR = [0.4, 0.8, 0.4]
 
 class FrictionDetector(contactListener):
